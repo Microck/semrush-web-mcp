@@ -1,6 +1,6 @@
 [project]
 name = "semrush-web-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Semrush MCP tools backed by your authenticated browser session"
 readme = "README.md"
 license = "MIT"

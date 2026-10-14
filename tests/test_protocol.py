@@ -7,6 +7,8 @@ import sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from semrush_web_mcp.server import REPORTS
+
 
 def test_stdio_discovery_validation_and_missing_browser():
     async def scenario():
@@ -27,7 +29,7 @@ def test_stdio_discovery_validation_and_missing_browser():
             initialized = await session.initialize()
             assert initialized.server_info.name == "semrush-web-mcp"
             catalog = await session.list_tools()
-            assert len(catalog.tools) == 11
+            assert {tool.name for tool in catalog.tools} == set(REPORTS)
             assert all("Authenticated" in tool.description for tool in catalog.tools)
             for name, arguments in [
                 ("keyword_overview", {}),

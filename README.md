@@ -2,8 +2,9 @@
 
 An MCP server that reads Semrush through your signed-in browser session.
 
-11 tools for keyword metrics, ideas, SERP results, ads, clusters, domain
-overview, organic keywords, competitors, backlinks and AI visibility.
+48 read operations for keyword research, organic rankings, competitors,
+keyword and backlink gaps, backlinks, historical/mobile research and AI
+visibility. Every MCP operation also has a native CLI command.
 Requests run inside Chromium with your existing account session.
 No Semrush developer API key or CAPTCHA service is required.
 
@@ -20,6 +21,8 @@ uv run --no-dev python -m patchright install chromium
 uv run --no-dev semrush-web-mcp setup
 uv run --no-dev semrush-web-mcp login
 ```
+
+To put the CLI command on your PATH, run `uv tool install .` from the checkout.
 
 Sign into Semrush in the visible browser, then close that window. The
 background browser resumes using the same private profile. `login` requires
@@ -58,40 +61,56 @@ For an existing browser managed elsewhere, including on other operating
 systems, use `serve --cdp-url http://127.0.0.1:9234`. It must contain a
 signed-in Semrush session. Keep CDP on localhost or behind SSH forwarding.
 
-## Tools
+## MCP and CLI operations
 
-| Tool | Inputs | Returns |
-| --- | --- | --- |
-| `account_status` | None | Session confirmation and account report limits |
-| `keyword_overview` | `keyword`, `database` | Volume, difficulty, CPC, intent and trends |
-| `keyword_ideas` | `keyword`, `database`, `questions_only`, `limit` | Related keywords or questions |
-| `keyword_serp` | `keyword`, `database`, `limit` | Ranked URLs and SERP features |
-| `keyword_ads` | `keyword`, `database`, `limit` | Search ad copies |
-| `keyword_clusters` | `keyword`, `database` | Related topics and intents |
-| `domain_overview` | `domain`, `database` | Organic/paid search metrics and backlink summary |
-| `domain_keywords` | `domain`, `database`, `limit` | Top-ten organic keyword sample |
-| `domain_competitors` | `domain`, `database`, `limit` | Organic competitors |
-| `domain_backlinks` | `domain`, `database` | Backlink overview, sample links and anchors |
-| `domain_ai_visibility` | `domain`, `database` | AI visibility, mentions and citations |
+Both interfaces use the same [operation catalog](docs/tool-catalog.md) and
+input schemas. List commands and schemas locally:
 
-`database` defaults to `us`. Keyword list limits default to 10, with a
-maximum of 100. Domain list limits default to 5, with a maximum of 10.
-Some domain reports are worldwide even when the common query schema
-includes a database. The server preserves the web endpoint's result.
+```sh
+semrush-web-mcp reports
+semrush-web-mcp reports --json
+semrush-web-mcp domain-keywords --help
+```
 
-Example prompt:
+| Research area | Operations |
+| --- | --- |
+| Keywords | Metrics, ideas/questions, SERPs, ads, clusters, paginated Keyword Magic and groups |
+| Organic search | Full rankings, top pages, subdomains, changes, competitors, topics and trends |
+| Gaps | Organic keyword overlaps and gaps, backlink prospects and profile comparisons |
+| Links | Full backlinks, referring domains, anchors, indexed pages, outbound domains, history and authority |
+| GEO | Domain AI visibility, mentions, citation sources and country distribution |
+| Account data | Permissions, databases, snapshot dates, projects, folders, saved lists and audit campaigns |
 
-> Use keyword_overview for "email marketing" in the US database, then show
-> five related keyword ideas and the leading search results.
+MCP names use underscores. CLI commands and flags use hyphens.
+For array and object flags, supply JSON. For example:
+
+```sh
+semrush-web-mcp keyword-overview --keyword 'email marketing' --json
+semrush-web-mcp keyword-magic --keyword 'email marketing' --questions-only --page 2 --page-size 20 --json
+semrush-web-mcp domain-keywords --domain openai.com --page 2 --page-size 20 --json
+semrush-web-mcp domain-keywords --domain openai.com --database mobile-us --date 1789430400 --date-type monthly --json
+semrush-web-mcp keyword-gap --domains '["openai.com","anthropic.com"]' --json
+semrush-web-mcp backlink-gap --domains '["openai.com","anthropic.com"]' --json
+semrush-web-mcp backlink-links --domain openai.com --filters '+|type||nofollow' --json
+```
+
+`database` defaults to `us`. Domain research also accepts mobile databases
+such as `mobile-us`. Obtain historical timestamps from `snapshot-dates`.
+Keyword Magic and organic report pages start at 1. Backlink pages start at 0.
+Gap queries use `offset` or a zero-based backlink page, as shown in their help.
+Provider caps and totals remain visible. There is no unlimited-export claim.
+Redirect JSON output to a local file with the shell when needed.
 
 Every successful result includes `authenticated: true`, `report` and `data`.
-Unknown inputs, expired sessions and Semrush errors return MCP errors.
+Unknown inputs, expired sessions and Semrush errors return MCP errors or a
+nonzero CLI exit. See [coverage and account restrictions](docs/feature-parity.md).
 
 ## How it works
 
 One private Chromium service owns the persistent login profile. Each MCP
 process connects through CDP and opens its own page. It observes the
-domain app's authentication parameters, then calls the same read endpoints
+domain app's authentication parameters and, when needed, the keyword gap
+app's authorization token. It calls the same read endpoints
 as the signed-in website using browser `fetch` and session cookies.
 
 The report page moves to a lightweight same-origin document after startup,
@@ -138,9 +157,8 @@ stdio subprocess. They cover all report mappings, session expiry, input
 validation, credential redaction, exact 64-bit identifiers and page cleanup.
 They require no Semrush account and make no external report requests.
 
-All 11 tools also passed live authenticated MCP calls on October 14, 2026.
-For example, `keyword_overview` returned US volume 33,100, difficulty 79 and
-CPC $29.59 for "email marketing". Live checks are separate from fixture tests.
+See [verification evidence](docs/verification.md) for live authenticated
+checks, pagination, native CLI calls and the automated test boundary.
 
 ## License
 

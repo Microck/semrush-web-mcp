@@ -1,44 +1,77 @@
 # Browser report contract
 
-All tools require a signed-in Semrush browser session. No tool imports
-cookies into an HTTP client, calls the anonymous free-tools API, creates
-projects, refreshes paid data, changes the account, or submits CAPTCHA tasks.
-Normal Semrush account report limits still apply.
+All operations require a signed-in Semrush browser session. They read fixed
+report endpoints inside Chromium. Callers cannot supply URLs, JavaScript,
+RPC methods, authentication parameters or account-changing operations.
+No operation purchases a subscription, starts a crawl, refreshes paid data,
+creates projects, imports cookies into an HTTP client or submits CAPTCHA tasks.
+Normal Semrush account report limits apply.
 
-Browser credentials remain in a private profile outside this repository.
-Domain API authentication parameters are observed from the page's own
-requests and held in memory. They never appear in results or logs.
+## Authentication and transports
 
-| Tool | Browser endpoint and method | Result |
+Credentials remain in a private persistent browser profile outside the repo.
+Domain authentication parameters come from the page's own `/dpa/rpc` requests.
+Keyword Gap observes the web app's authorization header on first use and uses
+its `gap.keywords` report header. Both remain in memory and are redacted from
+results and errors. Backlink overview requests initialize a logical report
+using the same generated `x-request-id` as its subsequent read.
+
+| Family | Endpoint | Shape |
 | --- | --- | --- |
-| `account_status` | `/kwogw/v2/webapi`, `user.GetInfo` | Authentication, trial and keyword-update limits |
-| `keyword_overview` | `/kwogw/v2/webapi`, `keywords.GetInfo` | Metrics for the selected database |
-| `keyword_ideas` | `/kwogw/v2/webapi`, `ideas.GetKeywords` | Related keywords or questions |
-| `keyword_serp` | `/kwogw/v2/webapi`, `serp.GetURLs` | Ranked URLs and SERP features |
-| `keyword_ads` | `/kwogw/v2/webapi`, `adwords.GetCopies` | Search ad copies |
-| `keyword_clusters` | `/kwogw/v2/webapi`, `clusters.Get` | Related topics and intents |
-| `domain_overview` | `/dpa/rpc`, `organic.Summary` + `backlinks.Summary` | Selected database search metrics and backlink summary |
-| `domain_keywords` | `/dpa/rpc`, `organic.PositionsOverview` | Top organic keyword positions |
-| `domain_competitors` | `/dpa/rpc`, `organic.CompetitorsOverview` | Organic competitors |
-| `domain_backlinks` | `/dpa/rpc`, `backlinks.Overview` | Backlink overview, sample links and anchors |
-| `domain_ai_visibility` | `/dpa/rpc`, `organic.AiSeoSummary` | AI visibility, mentions and citations |
+| Keyword overview | `/kwogw/v2/webapi` | JSON-RPC with phrase, database and keyword parameters |
+| Keyword Magic | `/kmtgw/v2/webapi` | JSON-RPC with matching mode, filters, grouping and page |
+| Domain research | `/dpa/rpc` | JSON-RPC with page-owned auth, report name and args |
+| Keyword Gap | `/spectrum/v1/Gap/*` | JSON with targets, filters and range; page-owned bearer auth |
+| Backlinks and Backlink Gap | `/analytics/backlinks/webapi2/` | GET with fixed report type, targets, paging and filters |
+| Backlink overview metrics | `/analytics/backlinks/webapi2/overview/*` | GET after report initialization |
+| Projects and saved lists | Fixed `/apis/v4-raw/` routes | Existing records only |
+| Audit campaigns | `/siteaudit/api/campaigns/seolist` | Existing campaigns only |
+| AI entitlement | `/ai-seo/api/v2/user/user_capabilities` | Account capability read |
 
-These methods and request shapes were observed in the signed-in web app
-on October 14, 2026. They are internal web APIs, so Semrush may change them.
+The [catalog](tool-catalog.md) identifies each operation's method and inputs.
+These internal requests were observed in the signed-in app on October 14,
+2026. Semrush can change them independently of this package.
 
-Keyword tools accept `keyword` and `database` (default `us`). Domain tools
-accept a bare `domain` and `database` (default `us`). Ideas optionally
-accept `questions_only`. List tools accept a bounded `limit` and return a
-prefix of the browser endpoint's result, not an unlimited export.
-Domain keyword positions use the overview report's top-ten sample.
+## Query and result behavior
 
-Results contain `authenticated: true`, the report name and `data`.
-Authentication is checked with a browser HEAD request to `/home/` before
-each report. An anonymous session redirects elsewhere and produces an
-explicit sign-in error. HTTP failures, JSON-RPC errors, unavailable browser,
-missing report data and account limits produce MCP `isError` results.
-There are no automatic request retries or alternate data sources.
+Pydantic validates each input at the boundary and rejects unknown fields.
+MCP discovery and CLI discovery expose the same model schema. Filters use
+the corresponding web API's filter structure or expression, never executable
+code. Array query parameters preserve repeated keys for multi-domain reports.
 
-The local browser service owns the persistent profile. Each MCP process
-owns one page and closes that page when its stdio connection ends.
-Independent OMP sessions share the browser, not their report pages.
+Organic rankings, pages, subdomains, competitors and changes return `rows`,
+`total`, `page` and `page_size`. Their totals come from a separate provider
+request. Pages start at 1 and contain at most 100 rows. `date` selects a Unix
+snapshot timestamp from `snapshot_dates`; `date_type` selects daily or monthly.
+Mobile databases use names such as `mobile-us`.
+
+Keyword Magic returns the provider's keyword or group object. Its separate
+summary operation provides matching totals. The overview `keyword_ideas`
+operation remains a sample; use Keyword Magic for paginated research.
+Backlink tables preserve the provider's caps, limits, offsets and totals;
+their pages start at 0. Keyword Gap uses a bounded limit and offset.
+Paid keyword/competitor overview operations remain explicitly labeled samples.
+
+Successful results contain `authenticated: true`, `report` and `data`.
+The server parses JSON in Python to preserve 64-bit identifiers exactly.
+It checks the session with a browser HEAD request to `/home/` before each
+operation. An anonymous redirect produces a sign-in error. HTTP, RPC and
+provider-status failures produce MCP `isError` results. No automatic retries
+or alternate sources hide failures or account limits.
+
+Each MCP process owns one page and closes it on stdio disconnect. It leaves
+the shared browser service running. Temporary auth listeners are removed.
+
+## CLI operation contract
+
+`reports --json` lists the MCP operation names and their input schemas.
+Every operation has a direct command, with underscores replaced by hyphens.
+Query fields become named flags. Boolean flags support `--no-FLAG`; array and
+object flags accept JSON. Nullable timestamps accept integer values.
+Both interfaces call the same browser operation and return the same result.
+
+`--json` emits one compact JSON object; default output is indented JSON.
+`--cdp-url` selects an existing browser instead of the configured service.
+Errors go to stderr, with exit 2 for invalid arguments, exit 1 for failed
+browser/report operations, and exit 130 for interruption. Report errors
+print no traceback or browser authentication fields.

@@ -4,88 +4,34 @@ import asyncio
 import json
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from importlib.metadata import version
 
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 from patchright.async_api import Error as BrowserError
 from patchright.async_api import async_playwright
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
+
+from .reports import REPORTS, report_parameters
 
 
 class SemrushError(Exception):
     """A report cannot be read without changing account or authentication state."""
 
 
-class EmptyQuery(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-
-class KeywordQuery(EmptyQuery):
-    keyword: str = Field(min_length=1, max_length=200)
-    database: str = Field(default="us", pattern="^[a-z]{2}$")
-
-
-class KeywordListQuery(KeywordQuery):
-    limit: int = Field(default=10, ge=1, le=100)
-
-
-class IdeasQuery(KeywordListQuery):
-    questions_only: bool = False
-
-
-class DomainQuery(EmptyQuery):
-    domain: str = Field(min_length=1, max_length=253, description="Bare domain, e.g. openai.com")
-    database: str = Field(default="us", pattern="^[a-z]{2}$")
-
-
-class DomainListQuery(DomainQuery):
-    limit: int = Field(default=5, ge=1, le=10)
-
-
-@dataclass(frozen=True)
-class Report:
-    method: str
-    query: type[BaseModel]
-    description: str
-
-
-REPORTS = {
-    "account_status": Report("user.GetInfo", EmptyQuery, "Signed-in account and report limits."),
-    "keyword_overview": Report(
-        "keywords.GetInfo", KeywordQuery, "Volume, difficulty, CPC, intent and trends."
-    ),
-    "keyword_ideas": Report(
-        "ideas.GetKeywords", IdeasQuery, "Related keywords or questions, with metrics."
-    ),
-    "keyword_serp": Report("serp.GetURLs", KeywordListQuery, "Ranked URLs and SERP features."),
-    "keyword_ads": Report("adwords.GetCopies", KeywordListQuery, "Search ad copies for a keyword."),
-    "keyword_clusters": Report("clusters.Get", KeywordQuery, "Keyword topics and search intents."),
-    "domain_overview": Report(
-        "organic.Summary", DomainQuery, "Search metrics and backlink summary."
-    ),
-    "domain_keywords": Report(
-        "organic.PositionsOverview", DomainListQuery, "Top-ten organic keyword sample."
-    ),
-    "domain_competitors": Report(
-        "organic.CompetitorsOverview", DomainListQuery, "Organic search competitors."
-    ),
-    "domain_backlinks": Report(
-        "backlinks.Overview", DomainQuery, "Backlink summary, sample links and anchors."
-    ),
-    "domain_ai_visibility": Report(
-        "organic.AiSeoSummary", DomainQuery, "AI visibility, mentions and citations."
-    ),
-}
-
 # Only fixed report methods above are exposed. Callers cannot supply a URL,
 # JavaScript, RPC method, auth fields or account-changing operation.
-FETCH_RPC = """async ({path, payload}) => {
-    const response = await fetch(path, {
-        method: 'POST', credentials: 'include',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload), signal: AbortSignal.timeout(45000)
+FETCH_REPORT = """async ({path, payload, get, headers}) => {
+    const query = new URLSearchParams();
+    if (get) for (const [key, value] of Object.entries(payload)) {
+        for (const item of Array.isArray(value) ? value : [value]) query.append(key, item);
+    }
+    const response = await fetch(get ? path + '?' + query : path, {
+        method: get ? 'GET' : 'POST', credentials: 'include',
+        headers: {...headers, ...(get ? {} : {'Content-Type': 'application/json'})},
+        ...(get ? {} : {body: JSON.stringify(payload)}),
+        signal: AbortSignal.timeout(45000)
     });
     if (!response.ok) return {status: response.status};
     return {status: response.status, text: await response.text()};
@@ -109,6 +55,7 @@ class BrowserSession:
         self.page = None
         self.playwright = None
         self.auth = {}
+        self.spectrum_headers = {}
         self.lock = asyncio.Lock()
 
     async def connect(self):
@@ -159,6 +106,38 @@ class BrowserSession:
         # telemetry and polling in every MCP process.
         await self.page.goto(self.origin + "/robots.txt", wait_until="domcontentloaded")
 
+    async def connect_spectrum(self):
+        if self.spectrum_headers:
+            return
+        ready = asyncio.Event()
+
+        def observe(request):
+            if request.url.startswith(self.origin + "/spectrum/") and request.headers.get(
+                "authorization"
+            ):
+                self.spectrum_headers = {
+                    key: request.headers[key]
+                    for key in ("authorization",)
+                    if key in request.headers
+                }
+                ready.set()
+
+        self.page.on("request", observe)
+        try:
+            await self.page.goto(
+                self.origin + "/analytics/keywordgap/?db=us",
+                wait_until="domcontentloaded",
+                timeout=45000,
+            )
+            await asyncio.wait_for(ready.wait(), timeout=15)
+        except (BrowserError, TimeoutError):
+            raise SemrushError(
+                "Semrush keyword gap authentication unavailable. Reconnect MCP after signing in."
+            ) from None
+        finally:
+            self.page.remove_listener("request", observe)
+            await self.page.goto(self.origin + "/robots.txt", wait_until="domcontentloaded")
+
     async def check_auth(self):
         if not await self.page.evaluate(CHECK_AUTH, isolated_context=False):
             await self.close()
@@ -166,38 +145,73 @@ class BrowserSession:
                 "Semrush session expired. Run semrush-web-mcp login, then reconnect MCP."
             )
 
-    async def rpc(self, method, params, *, domain=False):
-        path = "/dpa/rpc" if domain else "/kwogw/v2/webapi"
-        if domain:
-            params = {
-                "request_id": str(uuid.uuid4()),
-                "report": "domain.overview",
-                "args": params,
-                **self.auth,
+    def redact(self, value):
+        # Provider errors and REST responses can echo page-owned authentication.
+        if isinstance(value, dict):
+            return {
+                key: self.redact(item)
+                for key, item in value.items()
+                if key.lower() not in {"apikey", "key", "userid", "access_token", "authorization"}
             }
+        if isinstance(value, list):
+            return [self.redact(item) for item in value]
+        if isinstance(value, str):
+            for secret in (
+                self.auth.get("apiKey", ""),
+                self.spectrum_headers.get("authorization", ""),
+                self.spectrum_headers.get("authorization", "").removeprefix("Bearer "),
+            ):
+                # Do not replace numeric user identifiers inside URLs or business text.
+                if secret:
+                    value = value.replace(str(secret), "[redacted]")
+        return value
+
+    async def request(self, path, payload, *, get=False, headers=None):
         response = await self.page.evaluate(
-            FETCH_RPC,
-            {
-                "path": path,
-                "payload": {"id": 1, "jsonrpc": "2.0", "method": method, "params": params},
-            },
+            FETCH_REPORT,
+            {"path": path, "payload": payload, "get": get, "headers": headers or {}},
             isolated_context=False,
         )
         if response["status"] != 200:
-            raise SemrushError(f"Semrush {method}: HTTP {response['status']}")
+            raise SemrushError(f"Semrush report: HTTP {response['status']}")
         try:
             # Parse outside JavaScript so 64-bit report identifiers stay exact.
             body = json.loads(response["text"])
         except ValueError:
             raise SemrushError(
-                f"Semrush {method}: expected JSON, received a page or challenge"
+                "Semrush report: expected JSON, received a page or challenge"
             ) from None
-        if "error" in body:
-            error = body["error"]
-            message = str(error.get("message", "Report failed"))
-            for secret in self.auth.values():
-                message = message.replace(str(secret), "[redacted]")
-            raise SemrushError(f"Semrush {method}: {error.get('code')} {message[:500]}")
+        if isinstance(body, dict):
+            if "error" in body:
+                error = body["error"]
+                if isinstance(error, dict):
+                    message = f"{error.get('code')} {error.get('message', 'Report failed')}"
+                else:
+                    message = str(error)
+                raise SemrushError(f"Semrush report: {self.redact(message)[:500]}")
+            if body.get("status") not in (None, "SUCCESS", "success"):
+                raise SemrushError(f"Semrush report: {self.redact(str(body.get('status')))[:500]}")
+        return body
+
+    async def rpc(self, method, params, *, transport="keyword", web_report="domain.overview"):
+        path = {
+            "domain": "/dpa/rpc",
+            "direct": "/dpa/rpc",
+            "magic": "/kmtgw/v2/webapi",
+            "keyword": "/kwogw/v2/webapi",
+        }[transport]
+        if transport == "domain":
+            params = {
+                "request_id": str(uuid.uuid4()),
+                "report": web_report,
+                "args": params,
+                **self.auth,
+            }
+        elif transport == "direct":
+            params = {**params, **self.auth}
+        body = await self.request(
+            path, {"id": 1, "jsonrpc": "2.0", "method": method, "params": params}
+        )
         if "result" not in body:
             raise SemrushError(f"Semrush {method}: missing report result")
         return body["result"]
@@ -210,35 +224,59 @@ class BrowserSession:
         async with self.lock:
             await self.connect()
             await self.check_auth()
-            domain = name.startswith("domain_")
-            if domain:
-                params = {
-                    "searchItem": query["domain"],
-                    "searchType": "domain",
-                    "database": query["database"],
-                    "dateFormat": "date",
-                    "dateType": "daily",
-                }
-                if name in ("domain_backlinks", "domain_ai_visibility"):
-                    params.pop("database")
-                if name == "domain_keywords":
-                    params["positionsType"] = "all"
-                if name == "domain_competitors":
-                    params.update(display={"page": 1, "pageSize": query["limit"]}, youDomain=True)
-            elif name == "account_status":
-                params = {}
+            params = report_parameters(definition, query)
+            family = definition.transport
+            if family in ("keyword", "domain", "direct", "magic"):
+                result = await self.rpc(
+                    definition.method,
+                    params,
+                    transport=family,
+                    web_report=definition.web_report,
+                )
             else:
-                params = {
-                    "phrase": query["keyword"],
-                    "database": query["database"],
-                    "device": 0,
-                    "currency": "USD",
-                    "location": 0,
-                    "date": "",
+                headers = {}
+                if family == "gap":
+                    await self.connect_spectrum()
+                    headers = {
+                        **self.spectrum_headers,
+                        "x-report": "gap.keywords",
+                        "x-request-id": str(uuid.uuid4()),
+                    }
+                if family.startswith("backlink"):
+                    path = "/analytics/backlinks/webapi2/"
+                    if family == "backlink_overview":
+                        path += "overview/" + definition.method
+                    params["key"] = self.auth["apiKey"]
+                    if family == "backlink_overview":
+                        headers["x-request-id"] = str(uuid.uuid4())
+                        await self.request(
+                            "/analytics/backlinks/webapi2/overview/init",
+                            params,
+                            get=True,
+                            headers=headers,
+                        )
+                else:
+                    path = definition.method
+                    if path.startswith("/siteaudit/"):
+                        params["key"] = self.auth["apiKey"]
+                result = await self.request(
+                    path, params, get=family not in ("post", "gap", "projects"), headers=headers
+                )
+            if definition.total_method:
+                total = await self.rpc(
+                    definition.total_method,
+                    {key: value for key, value in params.items() if key != "display"}
+                    if name == "domain_position_changes"
+                    else params,
+                    transport="domain",
+                    web_report=definition.web_report,
+                )
+                result = {
+                    "rows": result,
+                    "total": total,
+                    "page": query["page"],
+                    "page_size": query["page_size"],
                 }
-                if name == "keyword_ideas":
-                    params.update(mode=0, questions_only=query["questions_only"])
-            result = await self.rpc(definition.method, params, domain=domain)
             if name == "keyword_overview":
                 matches = [
                     item for item in result["keywords"] if item["database"] == query["database"]
@@ -256,12 +294,12 @@ class BrowserSession:
                         "searchItem": query["domain"],
                         "searchType": "domain",
                     },
-                    domain=True,
+                    transport="domain",
                 )
                 result = {"search": metrics[0], "backlinks": backlinks}
             if "limit" in query and isinstance(result, list):
                 result = result[: query["limit"]]
-            return {"authenticated": True, "report": name, "data": result}
+            return {"authenticated": True, "report": name, "data": self.redact(result)}
 
     async def close(self):
         if self.page is not None and not self.page.is_closed():
@@ -272,6 +310,7 @@ class BrowserSession:
             self.context = None
         self.page = None
         self.auth.clear()
+        self.spectrum_headers.clear()
 
 
 def create_server(session):
@@ -312,7 +351,7 @@ def create_server(session):
 
     return Server(
         "semrush-web-mcp",
-        version="0.1.0",
+        version=version("semrush-web-mcp"),
         lifespan=lifespan,
         on_list_tools=list_tools,
         on_call_tool=call_tool,
