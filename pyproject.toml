@@ -1,0 +1,30 @@
+[project]
+name = "semrush-web-mcp"
+version = "0.1.0"
+description = "Semrush MCP tools backed by your authenticated browser session"
+readme = "README.md"
+license = "MIT"
+authors = [{name = "Microck"}]
+requires-python = ">=3.11"
+dependencies = ["mcp>=2.3,<3", "patchright>=1.63,<2", "pydantic>=2.12,<3"]
+
+[project.urls]
+Repository = "https://github.com/Microck/semrush-web-mcp"
+Issues = "https://github.com/Microck/semrush-web-mcp/issues"
+
+[project.scripts]
+semrush-web-mcp = "semrush_web_mcp.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "ruff>=0.14"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

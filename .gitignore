@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+dist/
+.env
+.env.*
+*auth-state*
+*browser-profile*/
+*credentials*
