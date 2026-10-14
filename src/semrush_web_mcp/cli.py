@@ -99,7 +99,7 @@ def main():
     installing.add_argument(
         "--port", type=int, choices=range(1024, 65536), default=9234, metavar="PORT"
     )
-    commands.add_parser("browser", help=argparse.SUPPRESS)
+    commands.add_parser("browser", help="Run the managed background browser")
     commands.add_parser("login", help="Open the private profile in a visible browser")
     args = parser.parse_args()
     if args.command == "setup":
