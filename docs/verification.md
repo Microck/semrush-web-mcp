@@ -4,7 +4,7 @@ Verified on October 14, 2026 on Linux ARM64 with Python 3.14.
 
 ## Automated checks
 
-- Ten tests pass. They use real Chromium, a local HTTP fixture, CLI processes
+- Eleven tests pass. They use real Chromium, a local HTTP fixture, CLI processes
   and a real MCP stdio subprocess. No test mocks modules or makes external
   Semrush requests.
 - The browser fixture exercises all 48 operation mappings, cookies, per-call
@@ -19,7 +19,7 @@ Verified on October 14, 2026 on Linux ARM64 with Python 3.14.
   No separate static type checker is configured.
 
 A concurrent local run hit host memory pressure and timed out in two checks.
-The serial rerun passed all ten tests without changing their timeouts or
+The serial rerun passed all ten tests in that build without changing their timeouts or
 weakening assertions.
 
 ## Live authenticated checks
@@ -45,6 +45,23 @@ the other pagination probes used three rows per page.
 Native CLI calls also passed for Keyword Gap, Backlink Gap, AI capabilities,
 and September 2026 mobile-US rankings. The historical/mobile call returned
 62,393 total rankings and three requested rows.
+
+The 0.2.1 startup change reads the signed-in page's serialized user JSON
+instead of rendering the Domain Overview dashboard. Live inspection confirmed
+that its API key and user ID exactly match the web RPC authentication values.
+The additional fixture test rejects missing authenticated bootstrap metadata.
+
+After recovering the private browser service from host resource exhaustion,
+a fresh OMP run using the installed 0.2.1 command completed both requests:
+
+| OMP operation | Authenticated | Rows returned |
+| --- | --- | ---: |
+| Organic rankings, page 2 | Yes | 2 |
+| Backlink Gap | Yes | 2 |
+
+Earlier OMP runs timed out during host memory pressure. Their failures are
+not counted as successes. The browser restart retained the authenticated
+profile. Other MCP configuration entries were unchanged.
 
 These checks establish access only for the tested account and queries.
 They do not establish all databases, filter combinations or paid products.

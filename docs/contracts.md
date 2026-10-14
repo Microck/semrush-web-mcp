@@ -10,7 +10,9 @@ Normal Semrush account report limits apply.
 ## Authentication and transports
 
 Credentials remain in a private persistent browser profile outside the repo.
-Domain authentication parameters come from the page's own `/dpa/rpc` requests.
+Domain authentication parameters come from the signed-in page's serialized
+`window.sm2.user` bootstrap JSON. The browser fetches that HTML without rendering
+the dashboard or executing its scripts. No JavaScript from the HTML is evaluated.
 Keyword Gap observes the web app's authorization header on first use and uses
 its `gap.keywords` report header. Both remain in memory and are redacted from
 results and errors. Backlink overview requests initialize a logical report

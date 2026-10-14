@@ -108,9 +108,9 @@ nonzero CLI exit. See [coverage and account restrictions](docs/feature-parity.md
 ## How it works
 
 One private Chromium service owns the persistent login profile. Each MCP
-process connects through CDP and opens its own page. It observes the
-domain app's authentication parameters and, when needed, the keyword gap
-app's authorization token. It calls the same read endpoints
+process connects through CDP and opens its own page. It reads the signed-in
+page's bootstrap JSON without rendering the dashboard and, when needed,
+observes the keyword gap app's authorization token. It calls the same read endpoints
 as the signed-in website using browser `fetch` and session cookies.
 
 The report page moves to a lightweight same-origin document after startup,

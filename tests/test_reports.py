@@ -16,7 +16,15 @@ from semrush_web_mcp.server import REPORTS, BrowserSession, SemrushError
 @contextmanager
 def website():
     calls = []
-    state = {"fail_method": None, "backlink_initializations": set()}
+    state = {
+        "fail_method": None,
+        "backlink_initializations": set(),
+        "bootstrap_user": {
+            "id": 7,
+            "api_key": "fixture-only-key",
+            "email": "private-fixture@example.test",
+        },
+    }
 
     class Handler(BaseHTTPRequestHandler):
         def do_HEAD(self):
@@ -69,11 +77,11 @@ def website():
                 self.wfile.write(body)
                 return
             if self.path.startswith("/analytics/overview/"):
-                body = b"""<div role="menuitem">My profile</div><script>
-                fetch('/dpa/rpc', {method:'POST',headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({id:1,jsonrpc:'2.0',method:'user.Databases',
-                params:{apiKey:'fixture-only-key',userId:7}})});
-                </script>"""
+                body = (
+                    "<script>window.sm2={}; window.sm2.user = "
+                    + json.dumps(state["bootstrap_user"])
+                    + ";</script>"
+                ).encode()
             else:
                 body = b"<html>fixture</html>"
             self.send_response(200)
@@ -294,3 +302,15 @@ def test_full_reports_preserve_pagination_filters_totals_and_auth_privacy():
         assert matrix_params["targets[]"] == ["openai.com", "anthropic.com"]
         assert matrix_params["target_types[]"] == ["root_domain", "root_domain"]
         assert matrix_params["display_page"] == ["1"]
+
+
+def test_missing_authenticated_bootstrap_stops_before_reports():
+    with website() as (origin, calls, state):
+        state["bootstrap_user"] = {"id": None, "api_key": None}
+
+        async def scenario(session, context):
+            with pytest.raises(SemrushError, match="authentication metadata unavailable"):
+                await session.report("account_status", {})
+            assert calls == []
+
+        asyncio.run(run_in_browser(origin, scenario))

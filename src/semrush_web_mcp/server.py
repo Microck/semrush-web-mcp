@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import re
 import uuid
 from contextlib import asynccontextmanager
+from html.parser import HTMLParser
 from importlib.metadata import version
 
 from mcp import types
@@ -19,6 +21,36 @@ from .reports import REPORTS, report_parameters
 class SemrushError(Exception):
     """A report cannot be read without changing account or authentication state."""
 
+
+class UserBootstrap(HTMLParser):
+    """Read the web app's JSON assignment without evaluating its JavaScript."""
+
+    def __init__(self):
+        super().__init__()
+        self.in_script = False
+        self.auth = {}
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            self.in_script = True
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self.in_script = False
+
+    def handle_data(self, text):
+        if self.in_script and (match := re.search(r"window\.sm2\.user\s*=\s*", text)):
+            user, _ = json.JSONDecoder().raw_decode(text, match.end())
+            if isinstance(user, dict) and user.get("api_key") and user.get("id"):
+                self.auth = {"apiKey": user["api_key"], "userId": user["id"]}
+
+
+FETCH_BOOTSTRAP = """async () => {
+    const response = await fetch('/analytics/overview/?db=us', {
+        credentials: 'include', signal: AbortSignal.timeout(45000)
+    });
+    return {status: response.status, text: response.ok ? await response.text() : ''};
+}"""
 
 # Only fixed report methods above are exposed. Callers cannot supply a URL,
 # JavaScript, RPC method, auth fields or account-changing operation.
@@ -72,39 +104,26 @@ class BrowserSession:
                 ) from None
             self.context = browser.contexts[0]
         self.page = await self.context.new_page()
-        ready = asyncio.Event()
-
-        def observe(request):
-            if request.url.split("?")[0] != self.origin + "/dpa/rpc":
-                return
-            try:
-                payload = request.post_data_json
-            except (ValueError, BrowserError):
-                return
-            for item in payload if isinstance(payload, list) else [payload]:
-                params = item.get("params", {})
-                if params.get("apiKey") and params.get("userId"):
-                    # Page-owned auth stays in memory and never enters tool results.
-                    self.auth = {key: params[key] for key in ("apiKey", "userId")}
-                    ready.set()
-
-        self.page.on("request", observe)
         try:
+            # Establish the origin, then read authentication without loading charts,
+            # app bundles or dashboard polling in every MCP process.
             await self.page.goto(
-                self.origin + "/analytics/overview/?db=us",
-                wait_until="domcontentloaded",
-                timeout=45000,
+                self.origin + "/robots.txt", wait_until="domcontentloaded", timeout=45000
             )
-            await self.page.get_by_role("menuitem", name="My profile", exact=True).wait_for(
-                timeout=15000
-            )
-            await asyncio.wait_for(ready.wait(), timeout=15)
-        except (BrowserError, TimeoutError):
+            response = await self.page.evaluate(FETCH_BOOTSTRAP, isolated_context=False)
+            bootstrap = UserBootstrap()
+            bootstrap.feed(response["text"])
+            if response["status"] != 200 or not bootstrap.auth:
+                await self.close()
+                raise SemrushError(
+                    "Semrush authentication metadata unavailable. Sign in with semrush-web-mcp login; if already signed in, the web app may have changed."
+                )
+            self.auth = bootstrap.auth
+        except (BrowserError, TimeoutError, ValueError):
             await self.close()
-            raise SemrushError("Semrush sign-in required. Run semrush-web-mcp login.") from None
-        # Keep the authenticated origin without running the dashboard's charts,
-        # telemetry and polling in every MCP process.
-        await self.page.goto(self.origin + "/robots.txt", wait_until="domcontentloaded")
+            raise SemrushError(
+                "Semrush authentication bootstrap failed. Check the browser service and sign in."
+            ) from None
 
     async def connect_spectrum(self):
         if self.spectrum_headers:
